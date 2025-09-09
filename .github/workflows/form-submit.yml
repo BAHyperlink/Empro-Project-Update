@@ -12,8 +12,6 @@ on:
       DESK_NUMBER:          { required: false, type: string }
       REMEMBER_ME:          { required: false, type: string }
       CONFIRM_SELECTOR:     { required: false, type: string }
-      USERNAME_SELECTOR:    { required: false, type: string }   # NEW
-      PASSWORD_SELECTOR:    { required: false, type: string }   # NEW
 
 
 jobs:
