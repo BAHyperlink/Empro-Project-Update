@@ -65,7 +65,7 @@ jobs:
 
           # (Optional UI tweaks — leave blank unless you need them)
           POST_LOGIN_READY_SELECTOR: ""
-          CALL_LOG_BUTTON_SELECTOR: ""
+          CALL_LOG_BUTTON_SELECTOR: 'button[data-target="#call_log_model"]'
           FORM_SUBMIT_SELECTOR: ""
           CONFIRM_SELECTOR: ""
 
