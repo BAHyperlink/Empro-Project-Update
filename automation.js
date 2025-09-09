@@ -99,15 +99,17 @@ async function injectCsrfHidden(page, {
 }
 
 // Request-level safety net: append CSRF to POST body when hitting /manager/login/signin
+// Request-level safety net: append CSRF to POST body when hitting /manager/login/signin
 async function addCsrfOnSigninPost(page) {
   await page.route('**/manager/login/signin', async (route) => {
     const req = route.request();
     const origBody = req.postData() || '';
     const params = new URLSearchParams(origBody);
 
+    // Try to pick up a CSRF cookie if present
     const cookies = await page.context().cookies();
-    const c = cookies.find(c => /csrf/i.test(c.name));
-    const token = c?.value || '';
+    const csrfCookie = cookies.find(c => /csrf/i.test(c.name));
+    const token = csrfCookie?.value || '';
 
     if (token) {
       if (!params.has('ci_csrf_token')) params.append('ci_csrf_token', token);
@@ -116,17 +118,22 @@ async function addCsrfOnSigninPost(page) {
       console.log(`[${now()}] CSRF ROUTE WARN: no CSRF cookie during POST intercept.`);
     }
 
-    const body = params.toString();
-    const headers = {
-      ...req.headers(),
-      'content-type': 'application/x-www-form-urlencoded',
-      'origin': 'https://reporting.hyperlinkinfosystem.net.in',
-      'referer': 'https://reporting.hyperlinkinfosystem.net.in/manager/login',
-    };
+    const newBody = params.toString();
 
-    console.log(`[${now()}] ROUTE /signin: appending CSRF=${token ? 'yes' : 'no'}; bodyLen=${body.length}`);
-    const resp = await route.fetch({ method: 'POST', headers, postData: body });
-    await route.fulfill(resp);
+    // Merge headers and set correct content-type; remove content-length so PW recalculates
+    const headers = { ...req.headers() };
+    delete headers['content-length'];
+    headers['content-type'] = 'application/x-www-form-urlencoded';
+    headers['origin'] = 'https://reporting.hyperlinkinfosystem.net.in';
+    headers['referer'] = 'https://reporting.hyperlinkinfosystem.net.in/manager/login';
+
+    console.log(`[${now()}] ROUTE /signin: appended CSRF=${!!token}; bodyLen ${origBody.length} -> ${newBody.length}`);
+
+    await route.continue({
+      method: 'POST',
+      headers,
+      postData: newBody,   // <-- continue with modified body
+    });
   });
 }
 
