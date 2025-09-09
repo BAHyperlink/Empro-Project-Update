@@ -1,17 +1,16 @@
-// automation.js (multi-project)
-// Login once → loop over projects → for each: open project → open "Call Log" → fill → submit
+// automation.js (multi-project, single login, session-stable navigation)
+// Login once → loop projects using the SAME page → dashboard warm-up → go to project with referer → submit call log
 //
-// Single-project ENV (legacy, still supported):
-//   LOGIN_URL, LOGIN_USERNAME, LOGIN_PASSWORD, PROJECT_URL
-//   COMM_TYPE, COMM_WITH_CLIENT, CALL_TYPE or CALL_TYPES, COMMENTS
+// ENV (required)
+//   LOGIN_URL, LOGIN_USERNAME, LOGIN_PASSWORD, PROJECTS_JSON
 //
-// Multi-project ENV (preferred):
-//   PROJECTS_JSON = JSON string of [{ project_url, comm_type, comm_with_client, call_types, comments }, ...]
-//
-// Optional ENV (login/UI):
+// Optional
 //   WORKPLACE, DESK_NUMBER, REMEMBER_ME, POST_LOGIN_READY_SELECTOR
 //   CALL_LOG_BUTTON_SELECTOR, FORM_SUBMIT_SELECTOR, CONFIRM_SELECTOR
-// Debug: PWDEBUG="1" to run headed locally
+//   // Project fields inside PROJECTS_JSON each object:
+//   //   { project_url, comm_type, comm_with_client, call_types (array or "A,B"), comments }
+//
+// Debug: PWDEBUG="1"  -> run headed locally
 //
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -28,52 +27,19 @@ const SEL_COMM_WITH_CLIENT = '#communicate_does_not';
 const SEL_MEETING_TYPE = '#meeting_type';   // multiple
 const SEL_COMMENTS = '#comments';
 
-async function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-async function waitAndClickVisible(page, locator, attempts = 3, label = '') {
-  const loc = page.locator(locator).first();
-  for (let i = 1; i <= attempts; i++) {
-    try {
-      await loc.waitFor({ state: 'visible', timeout: 8000 });
-      await loc.scrollIntoViewIfNeeded().catch(()=>{});
-      // Tiny pause lets Bootstrap toolbars settle
-      await wait(100);
-      await loc.click({ timeout: 3000 });
-      console.log(`CLICK OK → ${label || locator} (try ${i}/${attempts})`);
-      return true;
-    } catch (e) {
-      console.log(`CLICK RETRY ${i}/${attempts} → ${label || locator}: ${e.message}`);
-      await wait(300);
-    }
-  }
-  return false;
-}
-
-
 // ---------------- helpers ----------------
-async function clickOne(page, candidates) {
-  for (const sel of candidates) {
-    if (!sel) continue;
-    try {
-      if (typeof sel === 'object' && sel.role === 'button') {
-        await page.getByRole('button', { name: sel.name }).first().click({ timeout: sel.timeout || 5000 });
-        console.log(`CLICK OK → role:button name=${sel.name}`);
-      } else if (typeof sel === 'string' && sel.startsWith('text=')) {
-        await page.locator(sel).first().click({ timeout: 5000 });
-        console.log(`CLICK OK → ${sel}`);
-      } else if (typeof sel === 'string') {
-        await page.locator(sel).first().click({ timeout: 5000 });
-        console.log(`CLICK OK → ${sel}`);
-      } else {
-        continue;
-      }
-      return sel;
-    } catch { /* try next */ }
-  }
-  return null;
-}
 async function ensureDir(p) { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); }
+async function wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
+function originFrom(urlStr) {
+  const u = new URL(urlStr);
+  return `${u.protocol}//${u.host}`;
+}
+function dashboardURL(loginURL) {
+  const base = originFrom(loginURL);
+  // common dashboard path; adjust if your app uses another landing
+  return `${base}/manager/dashboard`;
+}
 function normalizeCommWithClient(v) {
   if (!v) return v;
   const x = String(v).trim().toLowerCase();
@@ -89,6 +55,31 @@ function toArray(val) {
   if (!val) return [];
   if (Array.isArray(val)) return val;
   return String(val).split(/[;,]/).map(s => s.trim()).filter(Boolean);
+}
+
+async function clickOne(page, candidates) {
+  for (const sel of candidates) {
+    if (!sel) continue;
+    try {
+      if (typeof sel === 'object' && sel.role === 'button') {
+        await page.getByRole('button', { name: sel.name }).first().click({ timeout: sel.timeout || 5000 });
+        console.log(`CLICK OK → role:button name=${sel.name}`);
+      } else if (typeof sel === 'string' && sel.startsWith('text=')) {
+        await page.locator(sel).first().click({ timeout: 5000 });
+        console.log(`CLICK OK → ${sel}`);
+      } else if (typeof sel === 'string') {
+        await page.locator(sel).first().click({ timeout: 5000 });
+        console.log(`CLICK OK → ${sel}`);
+      }
+      return sel;
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
+function isOnLoginPage(page) {
+  const url = page.url();
+  return /\/manager\/login/i.test(url);
 }
 
 async function login(page, env) {
@@ -150,100 +141,104 @@ async function login(page, env) {
   console.log('LOGIN OK');
 }
 
+async function reloginIfKicked(page, env) {
+  if (!isOnLoginPage(page)) return false;
+  console.log('INFO: Redirected to login — re-authenticating...');
+  await login(page, env);
+  return true;
+}
+
+async function goToProjectStable(page, env, url) {
+  const dash = dashboardURL(env.LOGIN_URL);
+  // Visit dashboard to keep same-origin referrer & refresh CSRF/session
+  console.log('NAV: dashboard warm-up →', dash);
+  await page.goto(dash, { waitUntil: 'domcontentloaded' });
+  await page.waitForLoadState('networkidle', { timeout: 30000 });
+
+  // Now deep-link to project with referer set to dashboard
+  console.log('NAV: project (with referer) →', url);
+  await page.goto(url, { waitUntil: 'domcontentloaded', referer: dash });
+  await page.waitForLoadState('networkidle', { timeout: 45000 });
+
+  console.log('DEBUG URL:', page.url());
+  console.log('DEBUG TITLE:', await page.title());
+
+  // If bounced to login, re-login once and retry
+  if (isOnLoginPage(page)) {
+    const relogged = await reloginIfKicked(page, env);
+    if (relogged) {
+      console.log('NAV RETRY: dashboard warm-up after re-login');
+      await page.goto(dash, { waitUntil: 'domcontentloaded' });
+      await page.waitForLoadState('networkidle', { timeout: 30000 });
+
+      console.log('NAV RETRY: project (with referer) →', url);
+      await page.goto(url, { waitUntil: 'domcontentloaded', referer: dash });
+      await page.waitForLoadState('networkidle', { timeout: 45000 });
+      console.log('DEBUG URL (after retry):', page.url());
+      console.log('DEBUG TITLE (after retry):', await page.title());
+    }
+  }
+}
+
 async function submitCallLogForProject(page, env, proj, idxTag, artifactsDir) {
   const nowTag = new Date().toISOString().replace(/[:.]/g, '-');
   const COMM_WITH_CLIENT = normalizeCommWithClient(proj.comm_with_client || '');
   const CALL_TYPES = toArray(proj.call_types || proj.call_type);
 
   console.log(`\n=== PROJECT ${idxTag}: ${proj.project_url} ===`);
-  console.log('STEP 10: goto project');
-// After: await page.goto(proj.project_url, { waitUntil: 'domcontentloaded' });
-await page.waitForLoadState('networkidle', { timeout: 45000 });
+  console.log('STEP 10: goto project (session-stable)');
+  await goToProjectStable(page, env, proj.project_url);
 
-// 1) Log sanity
-console.log('DEBUG URL:', page.url());
-console.log('DEBUG TITLE:', await page.title());
-
-// 2) If the page is framed, search in all frames later
-const btnSelector = env.CALL_LOG_BUTTON_SELECTOR || 'button[data-target="#call_log_model"]';
-
-// 3) Try to reveal actions if a nav/tab exists
-try {
-  // Common patterns (adjust if you know the exact tab text)
-  const tabCandidates = [
-    'nav a:has-text("Overview")',
-    'nav a:has-text("Updates")',
-    'ul.nav li:has-text("Overview") a',
-    'ul.nav li:has-text("Details") a'
-  ];
-  for (const t of tabCandidates) {
-    const c = await page.locator(t).count();
-    if (c > 0) { await page.locator(t).first().click({ timeout: 3000 }).catch(()=>{}); break; }
+  // If still on login, bail out early with HTML dump
+  if (isOnLoginPage(page)) {
+    const htmlPath = path.join(artifactsDir, `login-page-${idxTag}-${nowTag}.html`);
+    await fs.promises.writeFile(htmlPath, await page.content()).catch(()=>{});
+    console.log('Saved HTML (still on login):', htmlPath);
+    throw new Error('Still on login page after retry; server likely blocks deep-linking for this session/account');
   }
-} catch {}
 
-// 4) Expand hamburgers/kebab if present
-try {
-  const menuCandidates = [
-    'button.navbar-toggler',          // bootstrap
-    'button[aria-label="More"]',
-    'button:has(svg[aria-label="More"])',
-    '.dropdown-toggle:visible'
-  ];
-  for (const m of menuCandidates) {
-    if (await page.locator(m).first().isVisible().catch(()=>false)) {
-      await page.locator(m).first().click({ timeout: 2000 }).catch(()=>{});
+  // ----------- OPEN CALL LOG MODAL -----------
+  console.log('STEP 11: open Call Log modal');
+  const btnSelector = env.CALL_LOG_BUTTON_SELECTOR || 'button[data-target="#call_log_model"]';
+
+  // Ensure header area is visible; then try to click the exact button, with retries
+  await page.evaluate(() => window.scrollTo(0, 0)).catch(()=>{});
+  try { await page.locator('.header.align-right').first().scrollIntoViewIfNeeded().catch(()=>{}); } catch {}
+  const btnCount = await page.locator(btnSelector).count().catch(() => 0);
+  console.log(`STEP 11a: found ${btnCount} "Call Log" button(s) with selector: ${btnSelector}`);
+
+  let opened = false;
+  for (let i = 1; i <= 4 && !opened; i++) {
+    try {
+      await page.locator(btnSelector).first().waitFor({ state: 'visible', timeout: 4000 });
+      await page.locator(btnSelector).first().scrollIntoViewIfNeeded().catch(()=>{});
+      await wait(120);
+      await page.locator(btnSelector).first().click({ timeout: 3000 });
+      console.log(`CLICK OK → ${btnSelector} (try ${i}/4)`);
+      opened = true;
+    } catch (e) {
+      console.log(`CLICK RETRY ${i}/4 → ${btnSelector}: ${e.message}`);
+      await wait(300);
     }
   }
-} catch {}
 
-// 5) Bring top area into view
-await page.evaluate(() => window.scrollTo(0, 0)).catch(()=>{});
-try { await page.locator('.header.align-right').first().scrollIntoViewIfNeeded(); } catch {}
-
-// 6) Try main doc first
-let opened = false;
-for (const sel of [btnSelector, 'button:has-text("Call Log")', 'text=/\\bCall\\s*Log\\b/i']) {
-  try {
-    const loc = page.locator(sel).first();
-    await loc.waitFor({ state: 'visible', timeout: 4000 });
-    await loc.scrollIntoViewIfNeeded().catch(()=>{});
-    await loc.click({ timeout: 2000 });
-    console.log('CLICK OK (main) →', sel);
-    opened = true; break;
-  } catch {}
-}
-
-// 7) If not found, search all frames
-if (!opened) {
-  const frames = page.frames();
-  console.log('FRAME COUNT:', frames.length);
-  for (const f of frames) {
-    for (const sel of [btnSelector, 'button:has-text("Call Log")', 'text=/\\bCall\\s*Log\\b/i']) {
-      try {
-        const loc = f.locator(sel).first();
-        await loc.waitFor({ state: 'visible', timeout: 3000 });
-        await loc.scrollIntoViewIfNeeded().catch(()=>{});
-        await loc.click({ timeout: 2000 });
-        console.log('CLICK OK (frame) →', sel, 'in', f.url());
-        opened = true; break;
-      } catch {}
-    }
-    if (opened) break;
+  if (!opened) {
+    // fallbacks by text/role
+    opened = await (async () => {
+      try { await page.getByRole('button', { name: /call\s*log/i }).first().click({ timeout: 3000 }); console.log('CLICK OK → role:button Call Log'); return true; } catch { return false; }
+    })();
   }
-}
 
-if (!opened) {
-  // Dump HTML to an artifact so we can inspect the actual DOM
-  const htmlPath = path.join(artifactsDir, `page-${Date.now()}.html`);
-  await fs.promises.writeFile(htmlPath, await page.content());
-  console.log('Saved page HTML:', htmlPath);
-  throw new Error('Could not find the "Call Log" button');
-}
-
-
-if (!opened) throw new Error('Could not find the "Call Log" button');
-
+  if (!opened) {
+    // save HTML snippet for diagnostics
+    try {
+      const headerHtml = await page.locator('.header.align-right').first().innerHTML();
+      const htmlPath = path.join(artifactsDir, `header-${idxTag}-${nowTag}.html`);
+      await fs.promises.writeFile(htmlPath, headerHtml);
+      console.log('Saved header HTML:', htmlPath);
+    } catch {}
+    throw new Error('Could not find the "Call Log" button');
+  }
 
   console.log('STEP 12: wait for modal');
   await Promise.race([
@@ -253,7 +248,7 @@ if (!opened) throw new Error('Could not find the "Call Log" button');
   await page.screenshot({ path: path.join(artifactsDir, `modal-${idxTag}-${nowTag}.png`) }).catch(()=>{});
   console.log('Saved modal screenshot');
 
-  // COMM TYPE
+  // ----------- FILL FIELDS (using exact IDs) -----------
   if (proj.comm_type) {
     console.log('STEP 13: set Communication Type:', proj.comm_type);
     try {
@@ -263,7 +258,6 @@ if (!opened) throw new Error('Could not find the "Call Log" button');
     } catch (e) { console.log('COMM_TYPE WARN:', e.message); }
   } else { console.log('STEP 13: Communication Type: (none)'); }
 
-  // COMM WITH CLIENT (single)
   if (COMM_WITH_CLIENT) {
     console.log('STEP 14: set Communicate With Client:', COMM_WITH_CLIENT);
     try {
@@ -273,15 +267,15 @@ if (!opened) throw new Error('Could not find the "Call Log" button');
     } catch (e) { console.log('COMM_WITH_CLIENT WARN:', e.message); }
   } else { console.log('STEP 14: Communicate With Client: (none)'); }
 
-  // CALL TYPES (multiple)
-  console.log('STEP 15: set Call Type(s):', CALL_TYPES.length ? CALL_TYPES.join(', ') : '(none)');
-  if (CALL_TYPES.length) {
+  const callTypes = CALL_TYPES;
+  console.log('STEP 15: set Call Type(s):', callTypes.length ? callTypes.join(', ') : '(none)');
+  if (callTypes.length) {
     try {
-      await page.selectOption(SEL_MEETING_TYPE, CALL_TYPES.map(label => ({ label })));
+      await page.selectOption(SEL_MEETING_TYPE, callTypes.map(label => ({ label })));
       console.log('CALL TYPES OK');
     } catch (e) {
       console.log('CALL TYPES fallback: clicking list items');
-      for (const label of CALL_TYPES) {
+      for (const label of callTypes) {
         const item = page.locator('.ms-container .ms-selectable .ms-elem-selectable span', { hasText: label });
         try { await item.first().click({ timeout: 1500 }); console.log('Clicked ms item:', label); }
         catch { console.log('Could not click ms item:', label); }
@@ -289,7 +283,6 @@ if (!opened) throw new Error('Could not find the "Call Log" button');
     }
   }
 
-  // COMMENTS
   if (proj.comments) {
     console.log('STEP 16: fill Comments');
     try {
@@ -328,44 +321,29 @@ if (!opened) throw new Error('Could not find the "Call Log" button');
 }
 
 function loadProjectsFromEnv() {
-  // Prefer PROJECTS_JSON
-  if (process.env.PROJECTS_JSON && process.env.PROJECTS_JSON.trim() !== '') {
-    try {
-      const arr = JSON.parse(process.env.PROJECTS_JSON);
-      if (!Array.isArray(arr)) throw new Error('PROJECTS_JSON must be an array');
-      // Normalize keys
-      return arr.map((o, i) => ({
-        project_url: o.project_url || o.PROJECT_URL || o.url,
-        comm_type: o.comm_type || o.COMM_TYPE,
-        comm_with_client: o.comm_with_client || o.COMM_WITH_CLIENT,
-        call_types: o.call_types ?? o.CALL_TYPES ?? o.call_type ?? o.CALL_TYPE,
-        comments: o.comments || o.COMMENTS
-      })).filter(p => p.project_url);
-    } catch (e) {
-      throw new Error('Invalid PROJECTS_JSON: ' + e.message);
-    }
+  if (!process.env.PROJECTS_JSON || !process.env.PROJECTS_JSON.trim()) {
+    throw new Error('PROJECTS_JSON is required (non-empty array).');
   }
-  // Fallback to single project envs
-  if (process.env.PROJECT_URL) {
-    return [{
-      project_url: process.env.PROJECT_URL,
-      comm_type: process.env.COMM_TYPE || '',
-      comm_with_client: process.env.COMM_WITH_CLIENT || '',
-      call_types: process.env.CALL_TYPES || process.env.CALL_TYPE || '',
-      comments: process.env.COMMENTS || ''
-    }];
-  }
-  throw new Error('Provide PROJECTS_JSON (preferred) or PROJECT_URL (single).');
+  let arr;
+  try { arr = JSON.parse(process.env.PROJECTS_JSON); }
+  catch (e) { throw new Error('Invalid PROJECTS_JSON: ' + e.message); }
+  if (!Array.isArray(arr) || arr.length === 0) throw new Error('PROJECTS_JSON must be a non-empty array.');
+  return arr.map(o => ({
+    project_url: o.project_url || o.PROJECT_URL || o.url,
+    comm_type: o.comm_type || o.COMM_TYPE,
+    comm_with_client: o.comm_with_client || o.COMM_WITH_CLIENT,
+    call_types: o.call_types ?? o.CALL_TYPES ?? o.call_type ?? o.CALL_TYPE,
+    comments: o.comments || o.COMMENTS
+  })).filter(p => p.project_url);
 }
 
 (async () => {
   const headless = process.env.PWDEBUG ? false : true;
- const browser = await chromium.launch({ headless });
-const context = await browser.newContext({
-  viewport: { width: 1366, height: 900 }
-});
-const page = await context.newPage();
-
+  const browser = await chromium.launch({ headless });
+  const context = await browser.newContext({
+    viewport: { width: 1366, height: 900 }
+  });
+  const page = await context.newPage();
 
   const artifactsDir = path.join(process.cwd(), 'artifacts');
   await ensureDir(artifactsDir);
@@ -389,15 +367,14 @@ const page = await context.newPage();
     const projects = loadProjectsFromEnv();
     console.log(`BATCH: ${projects.length} project(s) to process`);
 
-    // Required env check
     if (!env.LOGIN_URL || !env.LOGIN_USERNAME || !env.LOGIN_PASSWORD) {
       throw new Error('Missing required env: LOGIN_URL, LOGIN_USERNAME, LOGIN_PASSWORD');
     }
 
-    // Login once
+    // ---- Login ONCE and reuse the SAME page for the whole batch ----
     await login(page, env);
 
-    // Process each project
+    // Loop projects on the same page/session
     for (let i = 0; i < projects.length; i++) {
       const proj = projects[i];
       const idxTag = `${i + 1}/${projects.length}`;
@@ -410,9 +387,12 @@ const page = await context.newPage();
           const snap = path.join(artifactsDir, `error-${i + 1}.png`);
           await page.screenshot({ path: snap, fullPage: true }).catch(()=>{});
           console.log('Saved error screenshot:', snap);
+          const htmlPath = path.join(artifactsDir, `page-${i + 1}.html`);
+          await fs.promises.writeFile(htmlPath, await page.content()).catch(()=>{});
+          console.log('Saved page HTML:', htmlPath);
         } catch {}
         results.push({ project_url: proj.project_url, ok: false, error: e.message || String(e) });
-        // Continue to next project
+        // continue to next
       }
     }
 
@@ -427,8 +407,7 @@ const page = await context.newPage();
     });
 
     await browser.close();
-    // Exit non-zero if any failed (optional; comment out if you prefer always-0)
-    process.exit(failCount > 0 ? 1 : 0);
+    process.exit(failCount > 0 ? 1 : 0); // non-zero if any failed (optional)
   } catch (err) {
     console.error('FATAL:', err && err.stack ? err.stack : err);
     try {
