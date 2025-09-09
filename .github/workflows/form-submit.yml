@@ -28,7 +28,14 @@ jobs:
       - run: npm i playwright
       - run: npx playwright install --with-deps chromium
       - name: Run automation
-        run: node automation.js
+      - name: Show files
+        run: |
+          pwd
+          ls -la
+          echo "----- automation.js head -----"
+          sed -n '1,120p' automation.js || true
+          echo "------------------------------"
+          node automation.js
         env:
           LOGIN_URL:  ${{ env.LOGIN_URL }}
           PROJECT_URL: ${{ inputs.PROJECT_URL }}
