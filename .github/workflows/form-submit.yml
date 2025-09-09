@@ -51,23 +51,22 @@ jobs:
           '
         env:
           PROJECTS_JSON: ${{ github.event.inputs.PROJECTS_JSON }}
-
       - name: Run automation (multi-project batch)
         run: node automation.js
         env:
-          # Login (secrets)
           LOGIN_URL: https://reporting.hyperlinkinfosystem.net.in/manager/login
           LOGIN_USERNAME: ${{ secrets.LOGIN_USERNAME }}
           LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
-
+      
           # Batch payload
           PROJECTS_JSON: ${{ github.event.inputs.PROJECTS_JSON }}
-
-          # (Optional UI tweaks — leave blank unless you need them)
-          POST_LOGIN_READY_SELECTOR: ""
+      
+          # Stable Call Log button
           CALL_LOG_BUTTON_SELECTOR: 'button[data-target="#call_log_model"]'
-          FORM_SUBMIT_SELECTOR: ""
-          CONFIRM_SELECTOR: ""
+      
+          # (Set this if your Project List path is NOT /manager/project)
+          PROJECT_LIST_URL: https://reporting.hyperlinkinfosystem.net.in/manager/project
+
 
       - name: Upload artifacts (screenshots, modal snaps)
         if: always()
