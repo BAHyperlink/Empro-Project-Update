@@ -58,15 +58,13 @@ jobs:
           LOGIN_USERNAME: ${{ secrets.LOGIN_USERNAME }}
           LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
       
-          # Batch payload
           PROJECTS_JSON: ${{ github.event.inputs.PROJECTS_JSON }}
-      
-          # Stable Call Log button
           CALL_LOG_BUTTON_SELECTOR: 'button[data-target="#call_log_model"]'
       
-          # (Set this if your Project List path is NOT /manager/project)
-          PROJECT_LIST_URL: https://reporting.hyperlinkinfosystem.net.in/manager/project
-
+          # NEW — set this to your real menu anchor that opens the list
+          PROJECT_LIST_MENU_SELECTOR: 'a[href="/manager/project"]'
+          # Optional: something that proves the list rendered (table, heading, etc.)
+          PROJECT_LIST_READY_SELECTOR: 'a[href*="/manager/project/details/"]'
 
       - name: Upload artifacts (screenshots, modal snaps)
         if: always()
