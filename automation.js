@@ -29,26 +29,25 @@ async function login(page) {
   // Try top-level frame first, then any iframes (some auth pages render inside an iframe)
   const frames = [page, ...page.frames()];
 
-  // Username candidates: override via USERNAME_SELECTOR if you know the exact one
   const userCandidates = [
-    process.env.USERNAME_SELECTOR,                 // explicit override (CSS)
-    'label:Username', 'label:User Name',           // labeled inputs
-    '[name="username"]', '#username', '#UserName',
-    'input[autocomplete="username"]',
-    'input[placeholder*="user" i]',
-    'input[type="email"]',
-    'input[type="text"]'
-  ];
+  '#username',                 // <— hardcode exact selector
+  process.env.USERNAME_SELECTOR,
+  'label:Username', 'label:User Name',
+  '[name="username"]', '#UserName',
+  'input[autocomplete="username"]',
+  'input[placeholder*="user" i]',
+  'input[type="email"]', 'input[type="text"]'
+];
 
-  // Password candidates: override via PASSWORD_SELECTOR if you know the exact one
-  const passCandidates = [
-    process.env.PASSWORD_SELECTOR,                 // explicit override (CSS)
-    'label:Password',
-    '[name="password"]', '#password', '#Password',
-    'input[autocomplete="current-password"]',
-    'input[placeholder*="pass" i]',
-    'input[type="password"]'
-  ];
+const passCandidates = [
+  '#password',                 
+  process.env.PASSWORD_SELECTOR,
+  'label:Password',
+  '[name="password"]', '#Password',
+  'input[autocomplete="current-password"]',
+  'input[placeholder*="pass" i]',
+  'input[type="password"]'
+];
 
   let filledUser = false, filledPass = false;
   for (const f of frames) {
