@@ -1,0 +1,43 @@
+name: Call Log Submit
+
+on:
+  workflow_dispatch:
+    inputs:
+      PROJECT_URL:          { required: true,  type: string }
+      COMM_TYPE:            { required: true,  type: string }
+      COMM_WITH_CLIENT:     { required: true,  type: string }
+      CALL_TYPE:            { required: false, type: string }
+      COMMENTS:             { required: true,  type: string }
+      WORKPLACE:            { required: false, type: string }
+      DESK_NUMBER:          { required: false, type: string }
+      REMEMBER_ME:          { required: false, type: string }
+      CONFIRM_SELECTOR:     { required: false, type: string }
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      LOGIN_URL: https://reporting.hyperlinkinfosystem.net.in/manager/login
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm init -y
+      - run: npm i playwright
+      - run: npx playwright install --with-deps chromium
+      - name: Run automation
+        run: node automation.js
+        env:
+          LOGIN_URL:  ${{ env.LOGIN_URL }}
+          PROJECT_URL: ${{ inputs.PROJECT_URL }}
+          COMM_TYPE: ${{ inputs.COMM_TYPE }}
+          COMM_WITH_CLIENT: ${{ inputs.COMM_WITH_CLIENT }}
+          CALL_TYPE: ${{ inputs.CALL_TYPE }}
+          COMMENTS: ${{ inputs.COMMENTS }}
+          WORKPLACE: ${{ inputs.WORKPLACE }}
+          DESK_NUMBER: ${{ inputs.DESK_NUMBER }}
+          REMEMBER_ME: ${{ inputs.REMEMBER_ME }}
+          CONFIRM_SELECTOR: ${{ inputs.CONFIRM_SELECTOR }}
+          LOGIN_USERNAME: ${{ secrets.LOGIN_USERNAME }}
+          LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
