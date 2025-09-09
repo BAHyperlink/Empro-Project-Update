@@ -124,64 +124,110 @@ async function reloginIfKicked(page, env) {
 }
 
 // NEW: Navigate via Project List page and click the internal link to details
+// NEW: Navigate via Project List page and click the internal link to details
 async function goToProjectViaList(page, env, projectURL) {
+  const artifactsDir = path.join(process.cwd(), 'artifacts');
+  const nowTag = new Date().toISOString().replace(/[:.]/g, '-');
   const listURL = env.PROJECT_LIST_URL || defaultProjectListURL(env.LOGIN_URL);
   const pathToken = detailsPathFromURL(projectURL); // e.g. /manager/project/details/MTQ2Mg==
+
   console.log('NAV: Project List →', listURL);
   await page.goto(listURL, { waitUntil: 'domcontentloaded' });
   await page.waitForLoadState('networkidle', { timeout: 45000 });
+  console.log('DEBUG (list) URL:', page.url());
+  console.log('DEBUG (list) TITLE:', await page.title());
 
   // If bounced, re-login once and re-open list
   if (isOnLoginPage(page)) {
+    console.log('INFO: On login page instead of list — re-authenticating...');
     const relogged = await reloginIfKicked(page, env);
     if (relogged) {
-      console.log('NAV RETRY: Project List after re-login');
+      console.log('NAV RETRY: Project List after re-login →', listURL);
       await page.goto(listURL, { waitUntil: 'domcontentloaded' });
       await page.waitForLoadState('networkidle', { timeout: 45000 });
+      console.log('DEBUG (list retry) URL:', page.url());
+      console.log('DEBUG (list retry) TITLE:', await page.title());
     }
   }
 
-  // Try to find an anchor whose href contains the details path token
-  console.log('FIND: anchor with href containing:', pathToken);
+  // Positive readiness check for the list page (optional but recommended)
+  if (env.PROJECT_LIST_READY_SELECTOR && env.PROJECT_LIST_READY_SELECTOR.trim()) {
+    const readySel = env.PROJECT_LIST_READY_SELECTOR.trim();
+    console.log('CHECK: wait for PROJECT_LIST_READY_SELECTOR →', readySel);
+    try {
+      await page.waitForSelector(readySel, { timeout: 12000 });
+      console.log('READY OK →', readySel);
+    } catch (e) {
+      console.log('READY FAIL →', readySel, e.message);
+      const htmlPath = path.join(artifactsDir, `project-list-not-ready-${nowTag}.html`);
+      const pngPath  = path.join(artifactsDir, `project-list-not-ready-${nowTag}.png`);
+      await fs.promises.writeFile(htmlPath, await page.content()).catch(()=>{});
+      await page.screenshot({ path: pngPath, fullPage: true }).catch(()=>{});
+      console.log('Saved list page for debug:', htmlPath);
+      console.log('Saved list screenshot    :', pngPath);
+      // continue; maybe the selector was too strict—still try to find links
+    }
+  }
+
+  // Log how many details links exist at all (sanity)
+  const allDetailsLinksSel = 'a[href*="/manager/project/details/"]';
+  let allDetailsCount = 0;
+  try { allDetailsCount = await page.locator(allDetailsLinksSel).count(); } catch {}
+  console.log(`SCAN: found ${allDetailsCount} total details link(s) via ${allDetailsLinksSel}`);
+
+  // Try to find an anchor whose href contains the exact details path token
   const linkSel = `a[href*="${pathToken.replace(/"/g, '\\"')}"]`;
   let count = 0;
   try { count = await page.locator(linkSel).count(); } catch { count = 0; }
-  console.log(`FOUND ${count} matching link(s)`);
+  console.log(`FIND: anchor with href containing "${pathToken}" → ${count} match(es)`);
 
-  // Optional: if there is a search box, try to filter by id/name (best-effort, non-fatal)
+  // Optional: if there is a search box, try to filter (best-effort, non-fatal)
   if (count === 0) {
-    // Heuristic: filter inputs commonly used in list pages
-    const searchCandidates = ['input[type="search"]', 'input[name*="search" i]', 'input[placeholder*="Search" i]'];
+    const searchCandidates = [
+      'input[type="search"]',
+      'input[name*="search" i]',
+      'input[placeholder*="Search" i]'
+    ];
     for (const sc of searchCandidates) {
       try {
-        if (await page.locator(sc).first().isVisible({ timeout: 2000 })) {
-          // Try searching by Base64 token and numeric id (if any)
-          const base64Token = pathToken.split('/').pop();
-          await page.fill(sc, base64Token);
-          await wait(300);
-          count = await page.locator(linkSel).count();
-          console.log(`SEARCH "${base64Token}" → links: ${count}`);
-          if (count > 0) break;
-          // If base64 decodes cleanly into a number, try that
-          try {
-            const decoded = Buffer.from(base64Token, 'base64').toString('utf8');
-            const maybeId = decoded.replace(/\D+/g,'');
-            if (maybeId) {
-              await page.fill(sc, maybeId);
-              await wait(300);
-              count = await page.locator(linkSel).count();
-              console.log(`SEARCH "${maybeId}" → links: ${count}`);
-              if (count > 0) break;
-            }
-          } catch {}
-        }
+        const vis = await page.locator(sc).first().isVisible({ timeout: 1000 }).catch(()=>false);
+        if (!vis) continue;
+        const base64Token = pathToken.split('/').pop();
+        console.log(`SEARCH via ${sc} → "${base64Token}"`);
+        await page.fill(sc, base64Token);
+        await wait(400);
+        count = await page.locator(linkSel).count().catch(()=>0);
+        console.log(`  results: ${count}`);
+        if (count > 0) break;
+
+        // Try numeric id if Base64 decodes nicely
+        try {
+          const decoded = Buffer.from(base64Token, 'base64').toString('utf8');
+          const maybeId = decoded.replace(/\D+/g,'');
+          if (maybeId) {
+            console.log(`SEARCH via ${sc} → "${maybeId}"`);
+            await page.fill(sc, maybeId);
+            await wait(400);
+            count = await page.locator(linkSel).count().catch(()=>0);
+            console.log(`  results: ${count}`);
+            if (count > 0) break;
+          }
+        } catch {}
       } catch {}
     }
   }
 
-  if (count === 0) throw new Error('Project link not found on the Project List page');
+  if (count === 0) {
+    const htmlPath = path.join(artifactsDir, `list-fail-${nowTag}.html`);
+    const pngPath  = path.join(artifactsDir, `list-fail-${nowTag}.png`);
+    await fs.promises.writeFile(htmlPath, await page.content()).catch(()=>{});
+    await page.screenshot({ path: pngPath, fullPage: true }).catch(()=>{});
+    console.log('Saved Project List HTML for debug:', htmlPath);
+    console.log('Saved Project List screenshot   :', pngPath);
+    throw new Error('Project link not found on the Project List page');
+  }
 
-  // Click the first link
+  // Click the first matched link
   for (let i = 1; i <= 4; i++) {
     try {
       const link = page.locator(linkSel).first();
@@ -202,8 +248,10 @@ async function goToProjectViaList(page, env, projectURL) {
   console.log('DEBUG URL (after click):', page.url());
   console.log('DEBUG TITLE (after click):', await page.title());
 
-  // As a guard, ensure we actually reached the details page path
   if (!page.url().includes(pathToken)) {
+    const htmlPath = path.join(artifactsDir, `after-click-wrong-page-${nowTag}.html`);
+    await fs.promises.writeFile(htmlPath, await page.content()).catch(()=>{});
+    console.log('Saved HTML (after click, unexpected page):', htmlPath);
     throw new Error('After clicking list link, did not reach project details');
   }
 }
