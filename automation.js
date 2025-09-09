@@ -28,6 +28,28 @@ const SEL_COMM_WITH_CLIENT = '#communicate_does_not';
 const SEL_MEETING_TYPE = '#meeting_type';   // multiple
 const SEL_COMMENTS = '#comments';
 
+async function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function waitAndClickVisible(page, locator, attempts = 3, label = '') {
+  const loc = page.locator(locator).first();
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      await loc.waitFor({ state: 'visible', timeout: 8000 });
+      await loc.scrollIntoViewIfNeeded().catch(()=>{});
+      // Tiny pause lets Bootstrap toolbars settle
+      await wait(100);
+      await loc.click({ timeout: 3000 });
+      console.log(`CLICK OK → ${label || locator} (try ${i}/${attempts})`);
+      return true;
+    } catch (e) {
+      console.log(`CLICK RETRY ${i}/${attempts} → ${label || locator}: ${e.message}`);
+      await wait(300);
+    }
+  }
+  return false;
+}
+
+
 // ---------------- helpers ----------------
 async function clickOne(page, candidates) {
   for (const sel of candidates) {
@@ -134,17 +156,61 @@ async function submitCallLogForProject(page, env, proj, idxTag, artifactsDir) {
   const CALL_TYPES = toArray(proj.call_types || proj.call_type);
 
   console.log(`\n=== PROJECT ${idxTag}: ${proj.project_url} ===`);
-  console.log('STEP 10:', 'goto project');
-  await page.goto(proj.project_url, { waitUntil: 'domcontentloaded' });
-  await page.waitForLoadState('networkidle', { timeout: 20000 });
+  console.log('STEP 10: goto project');
+await page.goto(proj.project_url, { waitUntil: 'domcontentloaded' });
+await page.waitForLoadState('networkidle', { timeout: 30000 });
 
-  console.log('STEP 11: open Call Log modal');
-  const clickedCallLog = await clickOne(page, [
-    env.CALL_LOG_BUTTON_SELECTOR,
-    { role: 'button', name: /call\s*log/i },
-    'text=/\\bCall\\s*Log\\b/i'
-  ]);
-  if (!clickedCallLog) throw new Error('Could not find the "Call Log" button');
+// Wait for a stable anchor on the project page
+console.log('STEP 10a: wait for project header/toolbar');
+await Promise.race([
+  page.waitForSelector('.header.align-right', { timeout: 15000 }),
+  page.waitForSelector('button[data-target="#call_log_model"]', { timeout: 15000 })
+]).catch(()=>{});
+
+// Scroll to top to ensure header is visible
+await page.evaluate(() => window.scrollTo(0, 0)).catch(()=>{});
+try { await page.locator('.header.align-right').first().scrollIntoViewIfNeeded(); } catch {}
+
+// Extra logging: how many buttons do we see?
+const btnSelector = env.CALL_LOG_BUTTON_SELECTOR || 'button[data-target="#call_log_model"]';
+const btnCount = await page.locator(btnSelector).count().catch(() => 0);
+console.log(`STEP 10b: found ${btnCount} matching Call Log button(s) with selector: ${btnSelector}`);
+
+if (btnCount === 0) {
+  // Dump a bit of the header HTML to logs to help debug
+  try {
+    const headerHtml = await page.locator('.header.align-right').first().innerHTML();
+    console.log('HEADER HTML SNIPPET START >>>');
+    console.log(headerHtml.slice(0, 2000)); // limit to 2k chars
+    console.log('<<< HEADER HTML SNIPPET END');
+  } catch {}
+}
+
+// STEP 11: open Call Log modal
+console.log('STEP 11: open Call Log modal');
+let opened = false;
+
+// 1) Try the exact env/attribute selector (with retries)
+if (!opened && btnCount > 0) {
+  opened = await waitAndClickVisible(page, btnSelector, 4, 'Call Log (exact selector)');
+}
+
+// 2) Try a strict text match (if text is present but attribute selector fails)
+if (!opened) {
+  opened = await waitAndClickVisible(page, 'button:has-text("Call Log")', 3, 'Call Log (text button)');
+}
+
+// 3) Fallbacks
+if (!opened) {
+  opened =
+    (await waitAndClickVisible(page, 'text=/\\bCall\\s*Log\\b/i', 2, 'Call Log (text regex)')) ||
+    (await (async () => {
+      try { await page.getByRole('button', { name: /call\s*log/i }).first().click({ timeout: 3000 }); console.log('CLICK OK → role:button Call Log'); return true; } catch { return false; }
+    })());
+}
+
+if (!opened) throw new Error('Could not find the "Call Log" button');
+
 
   console.log('STEP 12: wait for modal');
   await Promise.race([
@@ -261,9 +327,12 @@ function loadProjectsFromEnv() {
 
 (async () => {
   const headless = process.env.PWDEBUG ? false : true;
-  const browser = await chromium.launch({ headless });
-  const context = await browser.newContext();
-  const page = await context.newPage();
+ const browser = await chromium.launch({ headless });
+const context = await browser.newContext({
+  viewport: { width: 1366, height: 900 }
+});
+const page = await context.newPage();
+
 
   const artifactsDir = path.join(process.cwd(), 'artifacts');
   await ensureDir(artifactsDir);
