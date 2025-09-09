@@ -28,7 +28,7 @@ jobs:
       - run: npm i playwright
       - run: npx playwright install --with-deps chromium
       - name: Run automation
-          node automation.js
+        run: node automation.js
         env:
           LOGIN_URL:  ${{ env.LOGIN_URL }}
           PROJECT_URL: ${{ inputs.PROJECT_URL }}
