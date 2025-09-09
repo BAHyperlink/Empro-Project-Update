@@ -1,17 +1,4 @@
-// automation.js (multi-project, single login, session-stable navigation)
-// Login once → loop projects using the SAME page → dashboard warm-up → go to project with referer → submit call log
-//
-// ENV (required)
-//   LOGIN_URL, LOGIN_USERNAME, LOGIN_PASSWORD, PROJECTS_JSON
-//
-// Optional
-//   WORKPLACE, DESK_NUMBER, REMEMBER_ME, POST_LOGIN_READY_SELECTOR
-//   CALL_LOG_BUTTON_SELECTOR, FORM_SUBMIT_SELECTOR, CONFIRM_SELECTOR
-//   // Project fields inside PROJECTS_JSON each object:
-//   //   { project_url, comm_type, comm_with_client, call_types (array or "A,B"), comments }
-//
-// Debug: PWDEBUG="1"  -> run headed locally
-//
+// automation.js — multi-project, single login, navigate via Project List (internal click flow)
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
@@ -27,34 +14,31 @@ const SEL_COMM_WITH_CLIENT = '#communicate_does_not';
 const SEL_MEETING_TYPE = '#meeting_type';   // multiple
 const SEL_COMMENTS = '#comments';
 
-// ---------------- helpers ----------------
 async function ensureDir(p) { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); }
 async function wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
-function originFrom(urlStr) {
-  const u = new URL(urlStr);
-  return `${u.protocol}//${u.host}`;
-}
-function dashboardURL(loginURL) {
-  const base = originFrom(loginURL);
-  // common dashboard path; adjust if your app uses another landing
-  return `${base}/manager/dashboard`;
-}
+function originFrom(urlStr) { const u = new URL(urlStr); return `${u.protocol}//${u.host}`; }
+function defaultProjectListURL(loginURL) { return `${originFrom(loginURL)}/manager/project`; }
+function isOnLoginPage(page) { return /\/manager\/login/i.test(page.url()); }
+
 function normalizeCommWithClient(v) {
   if (!v) return v;
   const x = String(v).trim().toLowerCase();
-  if (x === 'successfully communicated' || x === 'successfully communicate' || x === 'communicated successfully') {
+  if (x === 'successfully communicated' || x === 'successfully communicate' || x === 'communicated successfully')
     return 'Successfully Communicate';
-  }
-  if (x === 'communicate cannot be done' || x === 'communicate can not be done') {
+  if (x === 'communicate cannot be done' || x === 'communicate can not be done')
     return 'Communicate Can Not Be Done';
-  }
   return v;
 }
 function toArray(val) {
   if (!val) return [];
   if (Array.isArray(val)) return val;
   return String(val).split(/[;,]/).map(s => s.trim()).filter(Boolean);
+}
+function detailsPathFromURL(projectURL) {
+  // e.g. https://host/manager/project/details/MTQ2Mg== -> /manager/project/details/MTQ2Mg==
+  const u = new URL(projectURL);
+  return u.pathname + (u.search || '') + (u.hash || '');
 }
 
 async function clickOne(page, candidates) {
@@ -63,23 +47,14 @@ async function clickOne(page, candidates) {
     try {
       if (typeof sel === 'object' && sel.role === 'button') {
         await page.getByRole('button', { name: sel.name }).first().click({ timeout: sel.timeout || 5000 });
-        console.log(`CLICK OK → role:button name=${sel.name}`);
-      } else if (typeof sel === 'string' && sel.startsWith('text=')) {
-        await page.locator(sel).first().click({ timeout: 5000 });
-        console.log(`CLICK OK → ${sel}`);
+        console.log(`CLICK OK → role:button name=${sel.name}`); return sel;
       } else if (typeof sel === 'string') {
         await page.locator(sel).first().click({ timeout: 5000 });
-        console.log(`CLICK OK → ${sel}`);
+        console.log(`CLICK OK → ${sel}`); return sel;
       }
-      return sel;
-    } catch { /* try next */ }
+    } catch {}
   }
   return null;
-}
-
-function isOnLoginPage(page) {
-  const url = page.url();
-  return /\/manager\/login/i.test(url);
 }
 
 async function login(page, env) {
@@ -148,35 +123,88 @@ async function reloginIfKicked(page, env) {
   return true;
 }
 
-async function goToProjectStable(page, env, url) {
-  const dash = dashboardURL(env.LOGIN_URL);
-  // Visit dashboard to keep same-origin referrer & refresh CSRF/session
-  console.log('NAV: dashboard warm-up →', dash);
-  await page.goto(dash, { waitUntil: 'domcontentloaded' });
-  await page.waitForLoadState('networkidle', { timeout: 30000 });
-
-  // Now deep-link to project with referer set to dashboard
-  console.log('NAV: project (with referer) →', url);
-  await page.goto(url, { waitUntil: 'domcontentloaded', referer: dash });
+// NEW: Navigate via Project List page and click the internal link to details
+async function goToProjectViaList(page, env, projectURL) {
+  const listURL = env.PROJECT_LIST_URL || defaultProjectListURL(env.LOGIN_URL);
+  const pathToken = detailsPathFromURL(projectURL); // e.g. /manager/project/details/MTQ2Mg==
+  console.log('NAV: Project List →', listURL);
+  await page.goto(listURL, { waitUntil: 'domcontentloaded' });
   await page.waitForLoadState('networkidle', { timeout: 45000 });
 
-  console.log('DEBUG URL:', page.url());
-  console.log('DEBUG TITLE:', await page.title());
-
-  // If bounced to login, re-login once and retry
+  // If bounced, re-login once and re-open list
   if (isOnLoginPage(page)) {
     const relogged = await reloginIfKicked(page, env);
     if (relogged) {
-      console.log('NAV RETRY: dashboard warm-up after re-login');
-      await page.goto(dash, { waitUntil: 'domcontentloaded' });
-      await page.waitForLoadState('networkidle', { timeout: 30000 });
-
-      console.log('NAV RETRY: project (with referer) →', url);
-      await page.goto(url, { waitUntil: 'domcontentloaded', referer: dash });
+      console.log('NAV RETRY: Project List after re-login');
+      await page.goto(listURL, { waitUntil: 'domcontentloaded' });
       await page.waitForLoadState('networkidle', { timeout: 45000 });
-      console.log('DEBUG URL (after retry):', page.url());
-      console.log('DEBUG TITLE (after retry):', await page.title());
     }
+  }
+
+  // Try to find an anchor whose href contains the details path token
+  console.log('FIND: anchor with href containing:', pathToken);
+  const linkSel = `a[href*="${pathToken.replace(/"/g, '\\"')}"]`;
+  let count = 0;
+  try { count = await page.locator(linkSel).count(); } catch { count = 0; }
+  console.log(`FOUND ${count} matching link(s)`);
+
+  // Optional: if there is a search box, try to filter by id/name (best-effort, non-fatal)
+  if (count === 0) {
+    // Heuristic: filter inputs commonly used in list pages
+    const searchCandidates = ['input[type="search"]', 'input[name*="search" i]', 'input[placeholder*="Search" i]'];
+    for (const sc of searchCandidates) {
+      try {
+        if (await page.locator(sc).first().isVisible({ timeout: 2000 })) {
+          // Try searching by Base64 token and numeric id (if any)
+          const base64Token = pathToken.split('/').pop();
+          await page.fill(sc, base64Token);
+          await wait(300);
+          count = await page.locator(linkSel).count();
+          console.log(`SEARCH "${base64Token}" → links: ${count}`);
+          if (count > 0) break;
+          // If base64 decodes cleanly into a number, try that
+          try {
+            const decoded = Buffer.from(base64Token, 'base64').toString('utf8');
+            const maybeId = decoded.replace(/\D+/g,'');
+            if (maybeId) {
+              await page.fill(sc, maybeId);
+              await wait(300);
+              count = await page.locator(linkSel).count();
+              console.log(`SEARCH "${maybeId}" → links: ${count}`);
+              if (count > 0) break;
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+  }
+
+  if (count === 0) throw new Error('Project link not found on the Project List page');
+
+  // Click the first link
+  for (let i = 1; i <= 4; i++) {
+    try {
+      const link = page.locator(linkSel).first();
+      await link.waitFor({ state: 'visible', timeout: 5000 });
+      await link.scrollIntoViewIfNeeded().catch(()=>{});
+      await wait(120);
+      await link.click({ timeout: 4000 });
+      console.log(`CLICK OK → list link (try ${i}/4)`);
+      break;
+    } catch (e) {
+      console.log(`CLICK RETRY ${i}/4 list link:`, e.message);
+      if (i === 4) throw e;
+      await wait(300);
+    }
+  }
+
+  await page.waitForLoadState('networkidle', { timeout: 45000 });
+  console.log('DEBUG URL (after click):', page.url());
+  console.log('DEBUG TITLE (after click):', await page.title());
+
+  // As a guard, ensure we actually reached the details page path
+  if (!page.url().includes(pathToken)) {
+    throw new Error('After clicking list link, did not reach project details');
   }
 }
 
@@ -186,22 +214,21 @@ async function submitCallLogForProject(page, env, proj, idxTag, artifactsDir) {
   const CALL_TYPES = toArray(proj.call_types || proj.call_type);
 
   console.log(`\n=== PROJECT ${idxTag}: ${proj.project_url} ===`);
-  console.log('STEP 10: goto project (session-stable)');
-  await goToProjectStable(page, env, proj.project_url);
-
-  // If still on login, bail out early with HTML dump
-  if (isOnLoginPage(page)) {
-    const htmlPath = path.join(artifactsDir, `login-page-${idxTag}-${nowTag}.html`);
+  console.log('STEP 10: navigate via Project List and click details link');
+  try {
+    await goToProjectViaList(page, env, proj.project_url);
+  } catch (e) {
+    // Save page for diagnostics
+    const htmlPath = path.join(artifactsDir, `list-fail-${idxTag}-${nowTag}.html`);
     await fs.promises.writeFile(htmlPath, await page.content()).catch(()=>{});
-    console.log('Saved HTML (still on login):', htmlPath);
-    throw new Error('Still on login page after retry; server likely blocks deep-linking for this session/account');
+    console.log('Saved Project List HTML for debug:', htmlPath);
+    throw e;
   }
 
   // ----------- OPEN CALL LOG MODAL -----------
   console.log('STEP 11: open Call Log modal');
   const btnSelector = env.CALL_LOG_BUTTON_SELECTOR || 'button[data-target="#call_log_model"]';
 
-  // Ensure header area is visible; then try to click the exact button, with retries
   await page.evaluate(() => window.scrollTo(0, 0)).catch(()=>{});
   try { await page.locator('.header.align-right').first().scrollIntoViewIfNeeded().catch(()=>{}); } catch {}
   const btnCount = await page.locator(btnSelector).count().catch(() => 0);
@@ -221,22 +248,16 @@ async function submitCallLogForProject(page, env, proj, idxTag, artifactsDir) {
       await wait(300);
     }
   }
-
   if (!opened) {
-    // fallbacks by text/role
-    opened = await (async () => {
-      try { await page.getByRole('button', { name: /call\s*log/i }).first().click({ timeout: 3000 }); console.log('CLICK OK → role:button Call Log'); return true; } catch { return false; }
-    })();
+    opened = await (async () => { try { await page.getByRole('button', { name: /call\s*log/i }).first().click({ timeout: 3000 }); console.log('CLICK OK → role:button Call Log'); return true; } catch { return false; }})();
   }
-
   if (!opened) {
-    // save HTML snippet for diagnostics
-    try {
-      const headerHtml = await page.locator('.header.align-right').first().innerHTML();
+    const headerHtml = await page.locator('.header.align-right').first().innerHTML().catch(()=>null);
+    if (headerHtml) {
       const htmlPath = path.join(artifactsDir, `header-${idxTag}-${nowTag}.html`);
-      await fs.promises.writeFile(htmlPath, headerHtml);
+      await fs.promises.writeFile(htmlPath, headerHtml).catch(()=>{});
       console.log('Saved header HTML:', htmlPath);
-    } catch {}
+    }
     throw new Error('Could not find the "Call Log" button');
   }
 
@@ -248,7 +269,7 @@ async function submitCallLogForProject(page, env, proj, idxTag, artifactsDir) {
   await page.screenshot({ path: path.join(artifactsDir, `modal-${idxTag}-${nowTag}.png`) }).catch(()=>{});
   console.log('Saved modal screenshot');
 
-  // ----------- FILL FIELDS (using exact IDs) -----------
+  // ----------- FILL FIELDS -----------
   if (proj.comm_type) {
     console.log('STEP 13: set Communication Type:', proj.comm_type);
     try {
@@ -267,7 +288,7 @@ async function submitCallLogForProject(page, env, proj, idxTag, artifactsDir) {
     } catch (e) { console.log('COMM_WITH_CLIENT WARN:', e.message); }
   } else { console.log('STEP 14: Communicate With Client: (none)'); }
 
-  const callTypes = CALL_TYPES;
+  const callTypes = toArray(CALL_TYPES);
   console.log('STEP 15: set Call Type(s):', callTypes.length ? callTypes.join(', ') : '(none)');
   if (callTypes.length) {
     try {
@@ -285,10 +306,8 @@ async function submitCallLogForProject(page, env, proj, idxTag, artifactsDir) {
 
   if (proj.comments) {
     console.log('STEP 16: fill Comments');
-    try {
-      await page.fill(SEL_COMMENTS, proj.comments);
-      console.log('COMMENTS OK');
-    } catch (e) {
+    try { await page.fill(SEL_COMMENTS, proj.comments); console.log('COMMENTS OK'); }
+    catch (e) {
       console.log('COMMENTS WARN (fallbacks):', e.message);
       const fallbacks = ['textarea[name="comments"]', 'textarea', 'input[name*="comment" i]'];
       let ok = false;
@@ -310,7 +329,6 @@ async function submitCallLogForProject(page, env, proj, idxTag, artifactsDir) {
   if (!clickedSubmit) throw new Error('Could not find "SUBMIT DETAILS" button');
 
   await page.waitForLoadState('networkidle', { timeout: 20000 });
-
   if (env.CONFIRM_SELECTOR) {
     console.log('STEP 18: wait for confirm', env.CONFIRM_SELECTOR);
     try { await page.locator(env.CONFIRM_SELECTOR).waitFor({ state: 'visible', timeout: 15000 }); console.log('CONFIRM OK'); }
@@ -340,9 +358,7 @@ function loadProjectsFromEnv() {
 (async () => {
   const headless = process.env.PWDEBUG ? false : true;
   const browser = await chromium.launch({ headless });
-  const context = await browser.newContext({
-    viewport: { width: 1366, height: 900 }
-  });
+  const context = await browser.newContext({ viewport: { width: 1366, height: 900 } });
   const page = await context.newPage();
 
   const artifactsDir = path.join(process.cwd(), 'artifacts');
@@ -358,7 +374,8 @@ function loadProjectsFromEnv() {
     POST_LOGIN_READY_SELECTOR: process.env.POST_LOGIN_READY_SELECTOR || '',
     CALL_LOG_BUTTON_SELECTOR: process.env.CALL_LOG_BUTTON_SELECTOR || null,
     FORM_SUBMIT_SELECTOR: process.env.FORM_SUBMIT_SELECTOR || null,
-    CONFIRM_SELECTOR: process.env.CONFIRM_SELECTOR || null
+    CONFIRM_SELECTOR: process.env.CONFIRM_SELECTOR || null,
+    PROJECT_LIST_URL: process.env.PROJECT_LIST_URL || ''
   };
 
   const results = [];
@@ -371,10 +388,10 @@ function loadProjectsFromEnv() {
       throw new Error('Missing required env: LOGIN_URL, LOGIN_USERNAME, LOGIN_PASSWORD');
     }
 
-    // ---- Login ONCE and reuse the SAME page for the whole batch ----
+    // Login ONCE
     await login(page, env);
 
-    // Loop projects on the same page/session
+    // Loop projects using SAME session
     for (let i = 0; i < projects.length; i++) {
       const proj = projects[i];
       const idxTag = `${i + 1}/${projects.length}`;
@@ -392,7 +409,6 @@ function loadProjectsFromEnv() {
           console.log('Saved page HTML:', htmlPath);
         } catch {}
         results.push({ project_url: proj.project_url, ok: false, error: e.message || String(e) });
-        // continue to next
       }
     }
 
@@ -402,12 +418,10 @@ function loadProjectsFromEnv() {
     console.log('\n=== SUMMARY ===');
     console.log('Succeeded:', okCount);
     console.log('Failed   :', failCount);
-    results.forEach((r, idx) => {
-      console.log(`${idx + 1}. ${r.ok ? 'OK    ' : 'FAILED'} – ${r.project_url}${r.error ? ' – ' + r.error : ''}`);
-    });
+    results.forEach((r, idx) => console.log(`${idx + 1}. ${r.ok ? 'OK    ' : 'FAILED'} – ${r.project_url}${r.error ? ' – ' + r.error : ''}`));
 
     await browser.close();
-    process.exit(failCount > 0 ? 1 : 0); // non-zero if any failed (optional)
+    process.exit(failCount > 0 ? 1 : 0);
   } catch (err) {
     console.error('FATAL:', err && err.stack ? err.stack : err);
     try {
