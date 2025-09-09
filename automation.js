@@ -157,57 +157,90 @@ async function submitCallLogForProject(page, env, proj, idxTag, artifactsDir) {
 
   console.log(`\n=== PROJECT ${idxTag}: ${proj.project_url} ===`);
   console.log('STEP 10: goto project');
-await page.goto(proj.project_url, { waitUntil: 'domcontentloaded' });
-await page.waitForLoadState('networkidle', { timeout: 30000 });
+// After: await page.goto(proj.project_url, { waitUntil: 'domcontentloaded' });
+await page.waitForLoadState('networkidle', { timeout: 45000 });
 
-// Wait for a stable anchor on the project page
-console.log('STEP 10a: wait for project header/toolbar');
-await Promise.race([
-  page.waitForSelector('.header.align-right', { timeout: 15000 }),
-  page.waitForSelector('button[data-target="#call_log_model"]', { timeout: 15000 })
-]).catch(()=>{});
+// 1) Log sanity
+console.log('DEBUG URL:', page.url());
+console.log('DEBUG TITLE:', await page.title());
 
-// Scroll to top to ensure header is visible
+// 2) If the page is framed, search in all frames later
+const btnSelector = env.CALL_LOG_BUTTON_SELECTOR || 'button[data-target="#call_log_model"]';
+
+// 3) Try to reveal actions if a nav/tab exists
+try {
+  // Common patterns (adjust if you know the exact tab text)
+  const tabCandidates = [
+    'nav a:has-text("Overview")',
+    'nav a:has-text("Updates")',
+    'ul.nav li:has-text("Overview") a',
+    'ul.nav li:has-text("Details") a'
+  ];
+  for (const t of tabCandidates) {
+    const c = await page.locator(t).count();
+    if (c > 0) { await page.locator(t).first().click({ timeout: 3000 }).catch(()=>{}); break; }
+  }
+} catch {}
+
+// 4) Expand hamburgers/kebab if present
+try {
+  const menuCandidates = [
+    'button.navbar-toggler',          // bootstrap
+    'button[aria-label="More"]',
+    'button:has(svg[aria-label="More"])',
+    '.dropdown-toggle:visible'
+  ];
+  for (const m of menuCandidates) {
+    if (await page.locator(m).first().isVisible().catch(()=>false)) {
+      await page.locator(m).first().click({ timeout: 2000 }).catch(()=>{});
+    }
+  }
+} catch {}
+
+// 5) Bring top area into view
 await page.evaluate(() => window.scrollTo(0, 0)).catch(()=>{});
 try { await page.locator('.header.align-right').first().scrollIntoViewIfNeeded(); } catch {}
 
-// Extra logging: how many buttons do we see?
-const btnSelector = env.CALL_LOG_BUTTON_SELECTOR || 'button[data-target="#call_log_model"]';
-const btnCount = await page.locator(btnSelector).count().catch(() => 0);
-console.log(`STEP 10b: found ${btnCount} matching Call Log button(s) with selector: ${btnSelector}`);
-
-if (btnCount === 0) {
-  // Dump a bit of the header HTML to logs to help debug
+// 6) Try main doc first
+let opened = false;
+for (const sel of [btnSelector, 'button:has-text("Call Log")', 'text=/\\bCall\\s*Log\\b/i']) {
   try {
-    const headerHtml = await page.locator('.header.align-right').first().innerHTML();
-    console.log('HEADER HTML SNIPPET START >>>');
-    console.log(headerHtml.slice(0, 2000)); // limit to 2k chars
-    console.log('<<< HEADER HTML SNIPPET END');
+    const loc = page.locator(sel).first();
+    await loc.waitFor({ state: 'visible', timeout: 4000 });
+    await loc.scrollIntoViewIfNeeded().catch(()=>{});
+    await loc.click({ timeout: 2000 });
+    console.log('CLICK OK (main) →', sel);
+    opened = true; break;
   } catch {}
 }
 
-// STEP 11: open Call Log modal
-console.log('STEP 11: open Call Log modal');
-let opened = false;
-
-// 1) Try the exact env/attribute selector (with retries)
-if (!opened && btnCount > 0) {
-  opened = await waitAndClickVisible(page, btnSelector, 4, 'Call Log (exact selector)');
-}
-
-// 2) Try a strict text match (if text is present but attribute selector fails)
+// 7) If not found, search all frames
 if (!opened) {
-  opened = await waitAndClickVisible(page, 'button:has-text("Call Log")', 3, 'Call Log (text button)');
+  const frames = page.frames();
+  console.log('FRAME COUNT:', frames.length);
+  for (const f of frames) {
+    for (const sel of [btnSelector, 'button:has-text("Call Log")', 'text=/\\bCall\\s*Log\\b/i']) {
+      try {
+        const loc = f.locator(sel).first();
+        await loc.waitFor({ state: 'visible', timeout: 3000 });
+        await loc.scrollIntoViewIfNeeded().catch(()=>{});
+        await loc.click({ timeout: 2000 });
+        console.log('CLICK OK (frame) →', sel, 'in', f.url());
+        opened = true; break;
+      } catch {}
+    }
+    if (opened) break;
+  }
 }
 
-// 3) Fallbacks
 if (!opened) {
-  opened =
-    (await waitAndClickVisible(page, 'text=/\\bCall\\s*Log\\b/i', 2, 'Call Log (text regex)')) ||
-    (await (async () => {
-      try { await page.getByRole('button', { name: /call\s*log/i }).first().click({ timeout: 3000 }); console.log('CLICK OK → role:button Call Log'); return true; } catch { return false; }
-    })());
+  // Dump HTML to an artifact so we can inspect the actual DOM
+  const htmlPath = path.join(artifactsDir, `page-${Date.now()}.html`);
+  await fs.promises.writeFile(htmlPath, await page.content());
+  console.log('Saved page HTML:', htmlPath);
+  throw new Error('Could not find the "Call Log" button');
 }
+
 
 if (!opened) throw new Error('Could not find the "Call Log" button');
 
