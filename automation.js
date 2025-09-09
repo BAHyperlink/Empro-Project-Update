@@ -1,42 +1,29 @@
 // automation.js
-// End-to-end Playwright script:
-// 1) Login to portal (static selectors for username/password)
-// 2) Open project URL
-// 3) Click "Call Log"
-// 4) Fill fields (Communication Type, Communicate With Client, Call Type, Comments)
-// 5) Submit
+// Login → open project → open "Call Log" modal → fill Communication Type / Communicate With Client / Call Type(s) / Comments → submit
 //
-// ---- REQUIRED ENV VARS ----
-//   LOGIN_URL          e.g. https://reporting.hyperlinkinfosystem.net.in/manager/login
-//   LOGIN_USERNAME     (GitHub Secret)
-//   LOGIN_PASSWORD     (GitHub Secret)
-//   PROJECT_URL        e.g. https://.../manager/project/details/<id>
-// ---- OPTIONAL ENV VARS ----
-//   WORKPLACE                e.g. "Work From Home"
-//   DESK_NUMBER              e.g. "0"
-//   REMEMBER_ME              "true" | "false" | "yes" | "no"
-//   POST_LOGIN_READY_SELECTOR   CSS for element that proves login succeeded (optional)
-//
-//   COMM_TYPE                e.g. "Microsoft Team"
-//   COMM_WITH_CLIENT         e.g. "Successfully Communicated"
-//   CALL_TYPE                e.g. "Call"
-//   COMMENTS                 e.g. "I had call with client"
-//   CALL_LOG_BUTTON_SELECTOR override button selector (optional)
-//   FORM_SUBMIT_SELECTOR     override submit selector (optional)
-//   CONFIRM_SELECTOR         CSS/text of success message (optional)
-//
+// Required ENV:
+//   LOGIN_URL, LOGIN_USERNAME, LOGIN_PASSWORD, PROJECT_URL
+// Optional ENV:
+//   WORKPLACE, DESK_NUMBER, REMEMBER_ME, POST_LOGIN_READY_SELECTOR
+//   COMM_TYPE, COMM_WITH_CLIENT, CALL_TYPE (single) OR CALL_TYPES ("A,B,C")
+//   COMMENTS, CALL_LOG_BUTTON_SELECTOR, FORM_SUBMIT_SELECTOR, CONFIRM_SELECTOR
 // Debug:
-//   PWDEBUG="1"  -> run headed (useful locally)
-// ---------------------------------------------------------------------
-
+//   PWDEBUG="1"  -> run headed locally
+//
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 
-// ---- STATIC SELECTORS (as requested) ----
+// ---- STATIC login selectors (as requested) ----
 const USERNAME_SELECTOR = '#username';
 const PASSWORD_PRIMARY_SELECTOR = '#password';
 const PASSWORD_FALLBACKS = ['input[name="password"]', 'input[type="password"]'];
+
+// ---- Modal field selectors (from your HTML) ----
+const SEL_COMM_TYPE = '#communication_type';
+const SEL_COMM_WITH_CLIENT = '#communicate_does_not';
+const SEL_MEETING_TYPE = '#meeting_type';   // multiple
+const SEL_COMMENTS = '#comments';
 
 // ---------------- helpers ----------------
 async function clickOne(page, candidates) {
@@ -56,46 +43,30 @@ async function clickOne(page, candidates) {
         continue;
       }
       return sel;
-    } catch (e) {
-      // try next
-    }
+    } catch { /* try next */ }
   }
   return null;
 }
+async function ensureDir(p) { if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true }); }
 
-async function selectByLabelOrAny(page, label, value) {
-  try {
-    await page.getByLabel(label, { exact: true }).selectOption({ label: String(value) });
-    console.log(`SELECT OK → [${label}] = "${value}" (by label)`);
-    return true;
-  } catch {}
-  try {
-    await page.selectOption('select', { label: String(value) });
-    console.log(`SELECT OK → any <select> label "${value}" (fallback)`);
-    return true;
-  } catch {}
-  console.log(`SELECT WARN → could not set [${label}] = "${value}"`);
-  return false;
-}
-
-async function fillByLabelOrFallback(page, label, value, fallbacks = []) {
-  try {
-    await page.getByLabel(label, { exact: true }).fill(String(value ?? ''));
-    console.log(`FILL OK → [${label}]`);
-    return true;
-  } catch {}
-  for (const f of fallbacks) {
-    try { await page.fill(f, String(value ?? '')); console.log(`FALLBACK FILL OK → ${f}`); return true; } catch {}
+// Normalize sheet values to exact site labels where needed
+function normalizeCommWithClient(v) {
+  if (!v) return v;
+  const x = String(v).trim().toLowerCase();
+  if (x === 'successfully communicated' || x === 'successfully communicate' || x === 'communicated successfully') {
+    return 'Successfully Communicate';
   }
-  console.log(`FILL WARN → could not fill [${label}]`);
-  return false;
+  if (x === 'communicate cannot be done' || x === 'communicate can not be done') {
+    return 'Communicate Can Not Be Done';
+  }
+  return v;
+}
+function parseCallTypes(envSingle, envMany) {
+  const raw = envMany && envMany.trim() !== '' ? envMany : envSingle;
+  if (!raw) return [];
+  return raw.split(/[;,]/).map(s => s.trim()).filter(Boolean);
 }
 
-async function ensureDir(p) {
-  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
-}
-
-// --------------- main flow ---------------
 async function main() {
   const headless = process.env.PWDEBUG ? false : true;
   const browser = await chromium.launch({ headless });
@@ -120,9 +91,10 @@ async function main() {
     const REMEMBER_ME = (process.env.REMEMBER_ME || '').toLowerCase();
     const POST_LOGIN_READY_SELECTOR = process.env.POST_LOGIN_READY_SELECTOR || '';
 
-    const COMM_TYPE = process.env.COMM_TYPE || '';
-    const COMM_WITH_CLIENT = process.env.COMM_WITH_CLIENT || '';
-    const CALL_TYPE = process.env.CALL_TYPE || '';
+    const COMM_TYPE = process.env.COMM_TYPE || '';                         // e.g. "Microsoft Team"
+    const COMM_WITH_CLIENT_RAW = process.env.COMM_WITH_CLIENT || '';       // e.g. "Successfully Communicated" (sheet)
+    const COMM_WITH_CLIENT = normalizeCommWithClient(COMM_WITH_CLIENT_RAW);// → "Successfully Communicate" (site)
+    const CALL_TYPES = parseCallTypes(process.env.CALL_TYPE || '', process.env.CALL_TYPES || ''); // e.g. "Call, Follow up"
     const COMMENTS = process.env.COMMENTS || '';
 
     const CALL_LOG_BUTTON_SELECTOR = process.env.CALL_LOG_BUTTON_SELECTOR || null;
@@ -140,37 +112,29 @@ async function main() {
     console.log('STEP 2: wait for username', USERNAME_SELECTOR);
     await page.waitForSelector(USERNAME_SELECTOR, { timeout: 30000 });
 
-    console.log('STEP 3: fill username with static selector', USERNAME_SELECTOR);
+    console.log('STEP 3: fill username');
     await page.fill(USERNAME_SELECTOR, LOGIN_USERNAME);
 
-    console.log('STEP 4: fill password (primary then fallbacks)');
+    console.log('STEP 4: fill password');
     let passFilled = false;
-    try {
-      await page.fill(PASSWORD_PRIMARY_SELECTOR, LOGIN_PASSWORD, { timeout: 8000 });
-      console.log(`PASSWORD OK → ${PASSWORD_PRIMARY_SELECTOR}`);
-      passFilled = true;
-    } catch {
+    try { await page.fill(PASSWORD_PRIMARY_SELECTOR, LOGIN_PASSWORD, { timeout: 8000 }); passFilled = true; console.log(`PASSWORD OK → ${PASSWORD_PRIMARY_SELECTOR}`);} catch {}
+    if (!passFilled) {
       for (const fb of PASSWORD_FALLBACKS) {
-        try {
-          await page.fill(fb, LOGIN_PASSWORD, { timeout: 5000 });
-          console.log(`PASSWORD OK (fallback) → ${fb}`);
-          passFilled = true;
-          break;
-        } catch { /* next */ }
+        try { await page.fill(fb, LOGIN_PASSWORD, { timeout: 5000 }); passFilled = true; console.log(`PASSWORD OK (fallback) → ${fb}`); break; } catch {}
       }
     }
-    if (!passFilled) throw new Error('Could not locate password field (tried #password and common fallbacks)');
+    if (!passFilled) throw new Error('Could not locate password field');
 
     if (WORKPLACE) {
       console.log('STEP 5: select Work Place =', WORKPLACE);
-      await selectByLabelOrAny(page, 'Work Place', WORKPLACE);
+      try { await page.selectOption('select[name*="work" i], select#workplace', { label: WORKPLACE }); console.log('WORKPLACE OK'); }
+      catch { console.log('WORKPLACE WARN: could not select (continuing)'); }
     }
-
     if (DESK_NUMBER) {
       console.log('STEP 6: fill Desk Number =', DESK_NUMBER);
-      await fillByLabelOrFallback(page, 'Desk Number', DESK_NUMBER, ['input[name*="desk" i]']);
+      try { await page.fill('input[name*="desk" i], #desk_number', String(DESK_NUMBER)); console.log('DESK OK'); }
+      catch { console.log('DESK WARN: not found (continuing)'); }
     }
-
     if (REMEMBER_ME) {
       const want = REMEMBER_ME === 'true' || REMEMBER_ME === 'yes';
       console.log('STEP 7: set Remember Me =', want);
@@ -179,12 +143,10 @@ async function main() {
         const checked = await cb.isChecked().catch(() => false);
         if (want && !checked) await cb.check();
         if (!want && checked) await cb.uncheck();
-      } catch {
-        console.log('Remember Me checkbox not found (ok to continue)');
-      }
+      } catch { console.log('Remember Me not found (ok)'); }
     }
 
-    console.log('STEP 8: click Login (multiple strategies)');
+    console.log('STEP 8: click Login');
     const clickedLogin = await clickOne(page, [
       { role: 'button', name: /login/i },
       'button[type="submit"]',
@@ -209,60 +171,76 @@ async function main() {
     // ----------- OPEN CALL LOG MODAL -----------
     console.log('STEP 11: open Call Log modal');
     const clickedCallLog = await clickOne(page, [
-      CALL_LOG_BUTTON_SELECTOR,                          // explicit override
-      { role: 'button', name: /call\s*log/i },           // role-based by visible name
-      'text=/\\bCall\\s*Log\\b/i'                        // text fallback
+      CALL_LOG_BUTTON_SELECTOR,
+      { role: 'button', name: /call\s*log/i },
+      'text=/\\bCall\\s*Log\\b/i'
     ]);
     if (!clickedCallLog) throw new Error('Could not find the "Call Log" button');
 
-    console.log('STEP 12: wait for modal/dialog or submit button');
+    console.log('STEP 12: wait for modal');
     await Promise.race([
       page.getByRole('dialog', { name: /call\s*log/i }).waitFor({ state: 'visible', timeout: 10000 }),
       page.waitForSelector('button:has-text("SUBMIT DETAILS"), text=/SUBMIT DETAILS/i', { timeout: 10000 })
     ]).catch(() => {});
+    await page.screenshot({ path: `artifacts/modal-${nowTag}.png` }).catch(()=>{});
+    console.log('Saved modal screenshot');
 
-    // ----------- FILL FIELDS -----------
-    console.log('STEP 13: set Communication Type:', COMM_TYPE);
-    if (COMM_TYPE) await selectByLabelOrAny(page, 'Communication Type', COMM_TYPE);
+    // ----------- FILL FIELDS (using exact IDs) -----------
+    console.log('STEP 13: set Communication Type:', COMM_TYPE || '(none)');
+    if (COMM_TYPE) {
+      try {
+        await page.selectOption(SEL_COMM_TYPE, { label: COMM_TYPE });
+        // Wait for Bootstrap-Select button text to update
+        await page.locator('[data-id="communication_type"] .filter-option').getByText(COMM_TYPE, { exact: false }).waitFor({ timeout: 2000 }).catch(()=>{});
+        console.log('COMM_TYPE OK');
+      } catch (e) {
+        console.log('COMM_TYPE WARN:', e.message);
+      }
+    }
 
-    console.log('STEP 14: set Communicate With Client:', COMM_WITH_CLIENT);
+    console.log('STEP 14: set Communicate With Client (single):', COMM_WITH_CLIENT || '(none)');
     if (COMM_WITH_CLIENT) {
-      let ok = await selectByLabelOrAny(page, 'Communicate With Client', COMM_WITH_CLIENT);
-      if (!ok) {
-        // Dual-list fallback (best-effort)
-        try {
-          const leftItem = page.locator(`div[role="listbox"] >> text=${JSON.stringify(COMM_WITH_CLIENT)}`);
-          if (await leftItem.count()) {
-            await leftItem.first().click();
-            const transfer = page.locator('button:has-text(">"), [data-icon="chevron-right"], .mdi-chevron-right').first();
-            await transfer.click({ timeout: 2000 }).catch(() => {});
-            console.log('TRANSFER OK → moved item to selected list');
-            ok = true;
-          }
-        } catch {}
+      try {
+        await page.selectOption(SEL_COMM_WITH_CLIENT, { label: COMM_WITH_CLIENT });
+        await page.locator('[data-id="communicate_does_not"] .filter-option').getByText(COMM_WITH_CLIENT, { exact: false }).waitFor({ timeout: 2000 }).catch(()=>{});
+        console.log('COMM_WITH_CLIENT OK');
+      } catch (e) {
+        console.log('COMM_WITH_CLIENT WARN:', e.message);
       }
-      if (!ok) console.log('WARN: could not set "Communicate With Client"');
     }
 
-    console.log('STEP 15: set Call Type:', CALL_TYPE);
-    if (CALL_TYPE) {
-      let ok = false;
-      try { await page.getByLabel('Call', { exact: true }).selectOption({ label: CALL_TYPE }); ok = true; } catch {}
-      if (!ok) {
-        try {
-          const item = page.locator(`div[role="listbox"] >> text=${JSON.stringify(CALL_TYPE)}`);
-          if (await item.count()) { await item.first().click(); ok = true; }
-        } catch {}
+    const callTypes = CALL_TYPES;
+    console.log('STEP 15: set Call Type(s):', callTypes.length ? callTypes.join(', ') : '(none)');
+    if (callTypes.length) {
+      try {
+        // Underlying <select multiple id="meeting_type"> exists; select by labels
+        await page.selectOption(SEL_MEETING_TYPE, callTypes.map(label => ({ label })));
+        console.log('CALL TYPES OK');
+      } catch (e) {
+        // Fallback: click items in the left list (ms-elem-selectable)
+        console.log('CALL TYPES fallback: clicking list items');
+        for (const label of callTypes) {
+          const item = page.locator('.ms-container .ms-selectable .ms-elem-selectable span', { hasText: label });
+          try { await item.first().click({ timeout: 1500 }); console.log('Clicked ms item:', label); }
+          catch { console.log('Could not click ms item:', label); }
+        }
       }
-      if (!ok) console.log('WARN: could not set "Call"');
     }
 
-    console.log('STEP 16: fill Comments:', COMMENTS ? '(provided)' : '(empty)');
+    console.log('STEP 16: fill Comments');
     if (COMMENTS) {
-      await fillByLabelOrFallback(page, 'Comments', COMMENTS, [
-        'textarea',
-        'input[name*="comment" i]'
-      ]);
+      try {
+        await page.fill(SEL_COMMENTS, COMMENTS);
+        console.log('COMMENTS OK');
+      } catch (e) {
+        console.log('COMMENTS WARN (trying fallbacks):', e.message);
+        const fallbacks = ['textarea[name="comments"]', 'textarea', 'input[name*="comment" i]'];
+        let ok = false;
+        for (const sel of fallbacks) {
+          try { await page.fill(sel, COMMENTS, { timeout: 1000 }); console.log('COMMENTS fallback OK →', sel); ok = true; break; } catch {}
+        }
+        if (!ok) console.log('COMMENTS FAIL: not filled');
+      }
     }
 
     // ----------- SUBMIT -----------
@@ -270,7 +248,7 @@ async function main() {
     const clickedSubmit = await clickOne(page, [
       { role: 'button', name: /submit details/i },
       'text=/SUBMIT DETAILS/i',
-      FORM_SUBMIT_SELECTOR,                    // explicit override
+      FORM_SUBMIT_SELECTOR,
       'button[type="submit"]'
     ]);
     if (!clickedSubmit) throw new Error('Could not find "SUBMIT DETAILS" button');
@@ -279,12 +257,8 @@ async function main() {
 
     if (CONFIRM_SELECTOR) {
       console.log('STEP 18: wait for confirm', CONFIRM_SELECTOR);
-      try {
-        await page.locator(CONFIRM_SELECTOR).waitFor({ state: 'visible', timeout: 15000 });
-        console.log('CONFIRM OK');
-      } catch {
-        console.log('WARN: confirm selector not seen (may still be fine)');
-      }
+      try { await page.locator(CONFIRM_SELECTOR).waitFor({ state: 'visible', timeout: 15000 }); console.log('CONFIRM OK'); }
+      catch { console.log('WARN: confirm not seen (may still be fine)'); }
     }
 
     console.log('DONE: Call log submitted');
