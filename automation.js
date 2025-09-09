@@ -62,6 +62,51 @@ async function assertLoggedIn(page, artifactsDir, stageLabel){
   throw new Error(`Still on login page after ${stageLabel}`);
 }
 
+async function syncCsrfFromCookieToInput(page, explicitCookieName) {
+  // Find the hidden input whose name contains "csrf"
+  const inputHandle = await page.$('input[type="hidden"][name*="csrf" i]');
+  if (!inputHandle) {
+    console.log('CSRF WARN: no hidden input[name*="csrf"] found');
+    return false;
+  }
+  const inputName = await inputHandle.getAttribute('name');
+  let currentVal = await page.inputValue(`input[name="${inputName}"]`).catch(()=>'');
+  if (currentVal) {
+    console.log('CSRF OK (already present), length:', currentVal.length);
+    return true;
+  }
+
+  // Read cookies and try to find the CSRF cookie
+  const cookies = await page.context().cookies();
+  let token = '';
+  if (explicitCookieName) {
+    const c = cookies.find(c => c.name === explicitCookieName);
+    if (c && c.value) token = c.value;
+  }
+  if (!token) {
+    const c = cookies.find(c => /csrf/i.test(c.name));
+    if (c && c.value) token = c.value;
+  }
+  if (!token) {
+    console.log('CSRF WARN: no csrf cookie found among:', cookies.map(c=>c.name).join(', '));
+    return false;
+  }
+
+  // Set the hidden input’s value and dispatch an input/change event
+  await page.evaluate(({ name, value }) => {
+    const el = document.querySelector(`input[name="${name}"]`);
+    if (!el) return;
+    el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }, { name: inputName, value: token });
+
+  currentVal = await page.inputValue(`input[name="${inputName}"]`).catch(()=> '');
+  console.log('CSRF INJECTED (length):', currentVal ? currentVal.length : 0, 'from cookie name:', explicitCookieName || '(auto)');
+  return !!currentVal;
+}
+
+
 async function login(page, env, artifactsDir){
   console.log('STEP 1: goto login', env.LOGIN_URL);
   await page.goto(env.LOGIN_URL, { waitUntil: 'domcontentloaded' });
@@ -152,6 +197,50 @@ async function login(page, env, artifactsDir){
     const csrf  = await page.inputValue(csrfSel).catch(()=> '');
     console.log('DEBUG FORM:', { username: uname, password_length: pLen, csrf_length: csrf?.length || 0 });
   } catch {}
+
+  // --- Ensure/Inject CSRF token before submit ---
+const csrfInputSel = 'input[name="ci_csrf_token"], input.txt_csrfname[name="ci_csrf_token"], input[type="hidden"][name*="csrf" i]';
+
+// give the page a moment to let any JS populate the token
+await page.waitForLoadState('load', { timeout: 10000 }).catch(()=>{});
+await page.waitForTimeout(300);
+
+let csrfOk = false;
+try {
+  // Try to wait for token to appear naturally
+  await page.waitForFunction(
+    (sel) => {
+      const el = document.querySelector(sel);
+      return !!(el && el.value && el.value.length > 0);
+    },
+    csrfInputSel,
+    { timeout: 5000 }
+  );
+  const tokenVal = await page.inputValue(csrfInputSel).catch(()=> '');
+  console.log('CSRF OK (auto) length:', tokenVal ? tokenVal.length : 0);
+  csrfOk = !!tokenVal;
+} catch {
+  console.log('CSRF not auto-populated — attempting cookie→input sync...');
+  // If your app uses a specific cookie name, pass it via env.CSRF_COOKIE_NAME (e.g., "ci_csrf_token")
+  csrfOk = await syncCsrfFromCookieToInput(page, process.env.CSRF_COOKIE_NAME);
+}
+
+if (!csrfOk) {
+  // As a last resort, soft refresh once to force a new token (no cache), then try cookie→input again
+  console.log('CSRF last-resort: soft reload + re-sync');
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('#username', { timeout: 15000 }).catch(()=>{});
+  // Refill username/password/extra fields after reload (values may be cleared on reload)
+  await page.fill('#username', env.LOGIN_USERNAME);
+  try { await page.fill('#password', env.LOGIN_PASSWORD); } catch {}
+  if (env.WORKPLACE) { try { await page.selectOption('select[name="workplace"]', { label: env.WORKPLACE }); } catch {} }
+  if (String(env.DESK_NUMBER || '').length) { try { await page.fill('input[name="desk_number"]', String(env.DESK_NUMBER)); } catch {} }
+
+  // Try again
+  csrfOk = await syncCsrfFromCookieToInput(page, process.env.CSRF_COOKIE_NAME);
+  console.log('CSRF after reload →', csrfOk ? 'OK' : 'FAIL');
+}
+
 
   console.log('STEP 8: click Login (multiple strategies)');
   const clicked = await (async () => {
