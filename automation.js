@@ -40,6 +40,36 @@ async function assertNotLogin(page, artifactsDir, stageLabel) {
   throw new Error(`Still on login page after ${stageLabel}`);
 }
 
+async function openProjectDetailsDirect(page, env, projectURL, artifactsDir) {
+  console.log(`[${now()}] STEP 10: go directly to project details`);
+  console.log(`[${now()}] NAV → ${projectURL}`);
+
+  // First attempt
+  await page.goto(projectURL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+
+  // If bounced to login, re-login once and retry
+  if (isOnLoginUrl(page.url())) {
+    console.log(`[${now()}] INFO: bounced to login on deep-link; re-auth then retry once…`);
+    await login(page, env, artifactsDir);
+
+    console.log(`[${now()}] RETRY NAV → ${projectURL}`);
+    await page.goto(projectURL, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+  }
+
+  // Validate we actually reached the details page (URL contains token path)
+  const token = detailsPath(projectURL); // e.g. /manager/project/details/MTQ2Mg==
+  if (!page.url().includes(token)) {
+    console.log(`[${now()}] NAV RESULT: ${page.url()}`);
+    await dumpArtifacts(page, artifactsDir, 'direct-nav-mismatch');
+    throw new Error('Deep-link navigation did not land on the project details page');
+  }
+
+  console.log(`[${now()}] DETAILS OK → ${page.url()}`);
+}
+
+
 /* ============================== CSRF Helpers ============================== */
 
 // Inject hidden CSRF input(s) into #login_form using cookie value.
@@ -498,15 +528,10 @@ function loadProjectsFromEnv() {
       const idxTag = `${i + 1}/${projects.length}`;
       const proj = projects[i];
       try {
-        console.log(`\n[${now()}] === PROJECT ${idxTag}: ${proj.project_url} ===`);
-        await openProjectListByClick(page, env, artifactsDir);
-        await reloginIfNeeded(page, env, artifactsDir);
-
-        console.log(`[${now()}] STEP 10b: click project details link from list`);
-        await clickProjectFromList(page, proj.project_url);
-        await reloginIfNeeded(page, env, artifactsDir);
-
+        console.log(`[${now()}] === PROJECT ${idxTag}: ${proj.project_url} ===`);
+        await openProjectDetailsDirect(page, env, proj.project_url, artifactsDir);
         await openCallLogAndSubmit(page, env, proj, idxTag, artifactsDir);
+
       } catch (e) {
         console.error(`[${now()}] ERROR: Project ${idxTag} failed → ${e.message || e}`);
         await dumpArtifacts(page, artifactsDir, `error-proj-${i + 1}`);
