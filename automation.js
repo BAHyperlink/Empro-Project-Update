@@ -66,36 +66,116 @@ async function login(page, env, artifactsDir){
   console.log('STEP 1: goto login', env.LOGIN_URL);
   await page.goto(env.LOGIN_URL, { waitUntil: 'domcontentloaded' });
 
-  console.log('STEP 2: wait for username', USERNAME_SELECTOR);
-  await page.waitForSelector(USERNAME_SELECTOR, { timeout: 30000 });
+  console.log('STEP 2: wait for username #username');
+  await page.waitForSelector('#username', { timeout: 30000 });
 
   console.log('STEP 3: fill username');
-  await page.fill(USERNAME_SELECTOR, env.LOGIN_USERNAME);
+  await page.fill('#username', env.LOGIN_USERNAME);
 
   console.log('STEP 4: fill password (primary then fallbacks)');
-  let filled=false;
-  try { await page.fill(PASSWORD_PRIMARY_SELECTOR, env.LOGIN_PASSWORD, {timeout:8000}); filled=true; console.log('PASSWORD OK → #password'); } catch{}
-  if(!filled){
-    for(const fb of PASSWORD_FALLBACKS){
-      try { await page.fill(fb, env.LOGIN_PASSWORD, {timeout:5000}); filled=true; console.log(`PASSWORD OK (fallback) → ${fb}`); break; } catch{}
+  const PASSWORD_PRIMARY_SELECTOR = '#password';
+  const PASSWORD_FALLBACKS = ['input[name="password"]', 'input[type="password"]'];
+  let passFilled = false;
+  try { await page.fill(PASSWORD_PRIMARY_SELECTOR, env.LOGIN_PASSWORD, { timeout: 8000 }); passFilled = true; console.log('PASSWORD OK → #password'); } catch {}
+  if (!passFilled) {
+    for (const fb of PASSWORD_FALLBACKS) {
+      try { await page.fill(fb, env.LOGIN_PASSWORD, { timeout: 5000 }); passFilled = true; console.log(`PASSWORD OK (fallback) → ${fb}`); break; } catch {}
     }
   }
-  if(!filled) throw new Error('Could not locate password field');
+  if (!passFilled) throw new Error('Could not locate password field');
+
+  // --- REQUIRED EXTRA FIELDS ---
+  // Workplace (label text varies; use robust fallbacks)
+  if (env.WORKPLACE) {
+    console.log('STEP 5: select Work Place =', env.WORKPLACE);
+    const workplaceSelectors = [
+      'select[name="workplace"]',
+      'select#workplace',
+      'select[name*="work" i]',
+      'select:near(:text("Work Place"))' // best-effort
+    ];
+    let ok = false;
+    for (const sel of workplaceSelectors) {
+      try { await page.selectOption(sel, { label: env.WORKPLACE }); console.log('WORKPLACE OK →', sel); ok = true; break; } catch {}
+    }
+    if (!ok) console.log('WORKPLACE WARN: no matching <select> found (continuing)');
+  }
+
+  // Desk Number (text input)
+  if (typeof env.DESK_NUMBER !== 'undefined' && env.DESK_NUMBER !== null && String(env.DESK_NUMBER).length > 0) {
+    console.log('STEP 6: fill Desk Number =', env.DESK_NUMBER);
+    const deskSelectors = [
+      'input[name="desk_number"]',
+      '#desk_number',
+      'input[name*="desk" i]'
+    ];
+    let ok = false;
+    for (const sel of deskSelectors) {
+      try { await page.fill(sel, String(env.DESK_NUMBER)); console.log('DESK OK →', sel); ok = true; break; } catch {}
+    }
+    if (!ok) console.log('DESK WARN: desk field not found (continuing)');
+  }
+
+  // Remember Me (optional)
+  if (env.REMEMBER_ME) {
+    const want = /^(true|yes|1)$/i.test(String(env.REMEMBER_ME));
+    console.log('STEP 7: set Remember Me =', want);
+    try {
+      const cb = page.getByLabel('Remember Me', { exact: true });
+      const checked = await cb.isChecked().catch(() => false);
+      if (want && !checked) await cb.check();
+      if (!want && checked) await cb.uncheck();
+    } catch { console.log('Remember Me not found (ok)'); }
+  }
+
+  // --- Ensure CSRF token present before submit ---
+  const csrfSel = 'input[name="ci_csrf_token"], input.txt_csrfname[name="ci_csrf_token"]';
+  try {
+    await page.waitForFunction(
+      (sel) => {
+        const el = document.querySelector(sel);
+        return !!(el && typeof el.value === 'string' && el.value.length > 0);
+      },
+      csrfSel,
+      { timeout: 10000 }
+    );
+    const tokenVal = await page.inputValue(csrfSel).catch(() => '');
+    console.log('CSRF OK (length):', tokenVal ? tokenVal.length : 0);
+  } catch {
+    console.log('CSRF WARN: token not detected within 10s — submitting anyway (server may reject)');
+  }
+
+  // Debug current form values (masked)
+  try {
+    const uname = await page.inputValue('#username').catch(()=>'');
+    const pLen  = (await page.inputValue(PASSWORD_PRIMARY_SELECTOR).catch(()=>''))?.length || 0;
+    const csrf  = await page.inputValue(csrfSel).catch(()=> '');
+    console.log('DEBUG FORM:', { username: uname, password_length: pLen, csrf_length: csrf?.length || 0 });
+  } catch {}
 
   console.log('STEP 8: click Login (multiple strategies)');
-  const clicked = await clickOne(page, [
-    { role:'button', name:/login/i },
-    'button[type="submit"]',
-    'input[type="submit"]',
-    'text=/^\\s*Login\\s*$/i',
-  ]);
-  if(!clicked) throw new Error('Could not find Login submit');
+  const clicked = await (async () => {
+    const tries = [
+      { role:'button', name:/login/i },
+      'button[type="submit"]',
+      'input[type="submit"]',
+      'text=/^\\s*Login\\s*$/i'
+    ];
+    for (const t of tries) {
+      try {
+        if (typeof t === 'string') { await page.locator(t).first().click({ timeout: 5000 }); console.log(`CLICK OK → ${t}`); return true; }
+        await page.getByRole('button', { name: t.name }).first().click({ timeout: 5000 }); console.log(`CLICK OK → role:button name=${t.name}`); return true;
+      } catch {}
+    }
+    return false;
+  })();
+  if (!clicked) throw new Error('Could not find Login submit');
 
   await page.waitForLoadState('networkidle', { timeout: 20000 });
-  // POSITIVE assertion we’re actually logged in:
   await assertLoggedIn(page, artifactsDir, 'submit');
   console.log('LOGIN OK');
 }
+
 
 async function reloginIfKicked(page, env, artifactsDir){
   if(!isOnLoginPage(page)) return false;
