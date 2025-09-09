@@ -1,44 +1,77 @@
-name: Call Log Submit
+name: Form Submit (Multi-Project)
 
 on:
   workflow_dispatch:
     inputs:
-      PROJECT_URL:          { required: true,  type: string }
-      COMM_TYPE:            { required: true,  type: string }
-      COMM_WITH_CLIENT:     { required: true,  type: string }
-      CALL_TYPE:            { required: false, type: string }
-      COMMENTS:             { required: true,  type: string }
-      WORKPLACE:            { required: false, type: string }
-      DESK_NUMBER:          { required: false, type: string }
-      REMEMBER_ME:          { required: false, type: string }
-      CONFIRM_SELECTOR:     { required: false, type: string }
+      PROJECTS_JSON:
+        description: >-
+          JSON array of projects. Example:
+          [
+            {"project_url":"https://.../details/MTQ2Mg==","comm_type":"Microsoft Team","comm_with_client":"Successfully Communicated","call_types":"Call, Follow up","comments":"Talked; next steps shared"},
+            {"project_url":"https://.../details/MTQ2Nw==","comm_type":"Phone Call","comm_with_client":"Communicate Can Not Be Done","call_types":["Client Reply","Technical discussion"],"comments":"No answer; emailed summary"}
+          ]
+        required: true
+        type: string
 
+permissions:
+  contents: read
+
+concurrency:
+  group: form-submit-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    env:
-      LOGIN_URL: https://reporting.hyperlinkinfosystem.net.in/manager/login
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: '20'
-      - run: npm init -y
-      - run: npm i playwright
-      - run: npx playwright install --with-deps chromium
-      - name: Run automation
+          node-version: 20
+
+      - name: Install Playwright (Chromium)
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+
+      # Optional: quick sanity check for PROJECTS_JSON being valid JSON array
+      - name: Validate PROJECTS_JSON
+        run: |
+          node -e '
+            const s = process.env.PROJECTS_JSON || "";
+            let v;
+            try { v = JSON.parse(s); } catch (e) { console.error("Invalid JSON:", e.message); process.exit(1); }
+            if (!Array.isArray(v) || v.length === 0) { console.error("PROJECTS_JSON must be a non-empty array"); process.exit(1); }
+            console.log("Projects:", v.length);
+          '
+        env:
+          PROJECTS_JSON: ${{ github.event.inputs.PROJECTS_JSON }}
+
+      - name: Run automation (multi-project batch)
         run: node automation.js
         env:
-          LOGIN_URL:  ${{ env.LOGIN_URL }}
-          PROJECT_URL: ${{ inputs.PROJECT_URL }}
-          COMM_TYPE: ${{ inputs.COMM_TYPE }}
-          COMM_WITH_CLIENT: ${{ inputs.COMM_WITH_CLIENT }}
-          CALL_TYPE: ${{ inputs.CALL_TYPE }}
-          COMMENTS: ${{ inputs.COMMENTS }}
-          WORKPLACE: ${{ inputs.WORKPLACE }}
-          DESK_NUMBER: ${{ inputs.DESK_NUMBER }}
-          REMEMBER_ME: ${{ inputs.REMEMBER_ME }}
-          CONFIRM_SELECTOR: ${{ inputs.CONFIRM_SELECTOR }}
+          # Login (secrets)
+          LOGIN_URL: https://reporting.hyperlinkinfosystem.net.in/manager/login
           LOGIN_USERNAME: ${{ secrets.LOGIN_USERNAME }}
           LOGIN_PASSWORD: ${{ secrets.LOGIN_PASSWORD }}
+
+          # Batch payload
+          PROJECTS_JSON: ${{ github.event.inputs.PROJECTS_JSON }}
+
+          # (Optional UI tweaks — leave blank unless you need them)
+          POST_LOGIN_READY_SELECTOR: ""
+          CALL_LOG_BUTTON_SELECTOR: ""
+          FORM_SUBMIT_SELECTOR: ""
+          CONFIRM_SELECTOR: ""
+
+      - name: Upload artifacts (screenshots, modal snaps)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-artifacts
+          path: artifacts
