@@ -65,8 +65,8 @@ jobs:
           PROJECT_LIST_MENU_SELECTOR: 'a[href="/manager/project"]'
           # Optional: something that proves the list rendered (table, heading, etc.)
           PROJECT_LIST_READY_SELECTOR: 'a[href*="/manager/project/details/"]'
-          WORKPLACE: 'Work From Home'
-          DESK_NUMBER: '0'               
+          WORKPLACE: 'Merdian - 404'
+          DESK_NUMBER: '33'               
           REMEMBER_ME: 'true'
           
       - name: Upload artifacts (screenshots, modal snaps)
